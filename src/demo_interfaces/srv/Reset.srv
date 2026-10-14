@@ -1,0 +1,12 @@
+# 自定义服务：把设定值重置为新的值
+#
+# 一条横线 "---" 把文件分成两半：
+#   上半部分是 Request，下半部分是 Response。
+# 生成的 C++ 类型分别是 Reset::Request 和 Reset::Response。
+
+# ---- Request ----
+float64 new_setpoint
+---
+# ---- Response ----
+float64 old_setpoint
+bool success

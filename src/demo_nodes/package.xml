@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>demo_nodes</name>
+  <version>0.1.0</version>
+  <description>控制器与监视器节点，外加 launch 与参数文件。</description>
+  <maintainer email="you@example.com">Your Name</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>demo_interfaces</depend>
+  <depend>demo_tools</depend>
+
+  <!--
+    ★ 注意：这里**有** demo_math，但 CMakeLists.txt 里没有 find_package(demo_math)。
+
+    这不是笔误，而是两个文件在回答两个不同的问题：
+
+      package.xml : "这个包用到了哪些包？"        -> 看的是 **源代码**
+                    因为 controller_node.cpp 里 #include 了 demo_math/pid.hpp，
+                    所以这里的答案是"用到了"。
+                    colcon 靠它来排构建顺序、rosdep 靠它来装系统依赖。
+
+      CMakeLists  : "这个 target 要链接哪些东西？" -> 看的是 **编译链接**
+                    因为依赖是顺着 demo_tools PUBLIC 传过来的，所以不用再声明。
+
+    粒度不同、视角不同，所以两者对不上是正常的。
+    判断规则：
+      package.xml  -> 凡是 #include 了的包，都写进去（保守一点没坏处）
+      CMakeLists   -> 凡是这个 target 直接 include / 直接调用的，都 find_package
+                      （demo_nodes 这里是特例，为了演示传递性才省掉的）
+  -->
+  <depend>demo_math</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

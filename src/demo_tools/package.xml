@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>demo_tools</name>
+  <version>0.1.0</version>
+  <description>PID 自动整定库 + 一个离线命令行工具。演示 PUBLIC/PRIVATE 链接的传递性。</description>
+  <maintainer email="you@example.com">Your Name</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!--
+    三个依赖，对应三种不同的关系，值得逐个对照 CMakeLists.txt 看：
+
+      rclcpp      —— 编译要用、链接要 PUBLIC（头文件里出现 rclcpp::Duration）、运行要
+      demo_math   —— 同上，但它是**本工作空间里的包**。
+                     注意 package.xml 完全看不出"本地包"和"系统包"的区别，
+                     colcon 自己会把工作空间里的包和系统包统一处理。
+      （下面没有列 demo_tools_internal —— 它只是个 CMake target，不是 ROS 包，
+        所以 package.xml 里根本不存在这个概念。这是 CMake 的 target
+        和 ROS 的 package 两个粒度不同的直接体现。）
+  -->
+  <depend>rclcpp</depend>
+  <depend>demo_math</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

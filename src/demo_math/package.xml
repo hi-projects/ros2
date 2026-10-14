@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>demo_math</name>
+  <version>0.1.0</version>
+  <description>PID 控制器库。不产生节点，只产生一个共享库 + 一批公开头文件。</description>
+  <maintainer email="you@example.com">Your Name</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!--
+    用 <depend>（= build + build_export + exec 三合一）。
+
+    因为 pid.hpp 这个**公开头文件**里 #include <rclcpp/duration.hpp>，
+    所以 rclcpp 不只是"我自己编译时要"，而是：
+      - 编译 demo_math 时要                      (build)
+      - 编译 demo_math 的**下游**时也要          (build_export) ← 关键
+      - 运行时要动态库                            (exec)
+
+    只用 <build_depend> 的话，依赖不会被向下游导出。
+    "公开头文件里出现的类型" 是判断该用 <depend> 还是 <build_depend> 的最好标准。
+  -->
+  <depend>rclcpp</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

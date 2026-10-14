@@ -1,0 +1,52 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<!--
+  package.xml 是 ROS2 的"包身份证"。colcon 不读 CMakeLists.txt 来决定构建顺序，
+  它读 package.xml 的依赖关系来拓扑排序，然后才去调用每个包里的 CMakeLists.txt。
+  所以：package.xml 管"谁先编"，CMakeLists.txt 管"怎么编"。
+
+  文件名叫 package.xml 而不是 package_format3.xml，这里声明的是 format="3"。
+-->
+<package format="3">
+  <name>demo_interfaces</name>
+  <version>0.1.0</version>
+  <description>自定义 msg/srv。这个包不产生任何可执行文件，只产生 C++ 头文件。</description>
+  <!-- 记得改成你自己的名字和邮箱，colcon 会检查格式 -->
+  <maintainer email="you@example.com">Your Name</maintainer>
+  <license>Apache-2.0</license>
+
+  <!--
+    buildtool_depend：构建这个包所必需的工具，运行时不依赖。
+    ament_cmake 在这里是 buildtool，因为它提供的是 CMake 宏。
+    ★ 一个包的 <build_type> 就是由这里的 buildtool_depend 决定的：
+        ament_cmake   -> C++ 包（用 CMakeLists.txt）
+        ament_python  -> Python 包（用 setup.py）
+        cmake         -> 纯 CMake 包（不装 ament_package()）
+  -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <!--
+    build_depend vs exec_depend vs depend：
+      depend       = build_depend + build_export_depend + exec_depend 的简写
+      build_depend = 只有"编译这个包"时才需要
+      exec_depend  = 只有"运行这个包"时才需要
+    rosidl 这个依赖链天生是分开的：
+      编译期需要"生成器"，运行期需要"运行时库"，两者是完全不同的包。
+  -->
+  <build_depend>rosidl_default_generators</build_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <!-- std_msgs 编译期和运行期都要（因为 Target.msg 里嵌了 Header） -->
+  <depend>std_msgs</depend>
+
+  <!--
+    ★ 这一行的作用被严重低估：它把本包登记进 rosidl_interface_packages 这个组。
+    没有它，colcon 不会为别的包生成 demo_interfaces 相关的依赖映射，
+    跨包引用自定义消息时会报 "message type not found"。
+  -->
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <!-- 明确告诉 colcon：本包的构建类型是 ament_cmake -->
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

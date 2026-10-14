@@ -1,0 +1,9 @@
+# colcon 的三件套。它们全部由源码生成，不该进版本库。
+build/
+install/
+log/
+
+# 本工程用 Docker 跑，不需要本地工具链的产物
+__pycache__/
+*.pyc
+.vscode/

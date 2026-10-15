@@ -14,6 +14,19 @@
   <depend>demo_tools</depend>
 
   <!--
+    ★ rclcpp_action：写 action 的 server / client 需要的 C++ 库。
+
+    注意它和 demo_interfaces 里的 <depend>action_msgs</depend> 不是一回事：
+
+        demo_interfaces : action_msgs      <- 生成 action 的数据类型要用
+        demo_nodes      : rclcpp_action    <- 写 server/client 代码要用
+
+    一个在"定义接口"的那一层，一个在"使用接口"的那一层。
+    action 相关的 CMake 报错，十有八九是这两者之一写错了地方。
+  -->
+  <depend>rclcpp_action</depend>
+
+  <!--
     ★ 注意：这里**有** demo_math，但 CMakeLists.txt 里没有 find_package(demo_math)。
 
     这不是笔误，而是两个文件在回答两个不同的问题：

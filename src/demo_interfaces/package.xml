@@ -10,7 +10,7 @@
 <package format="3">
   <name>demo_interfaces</name>
   <version>0.1.0</version>
-  <description>自定义 msg/srv。这个包不产生任何可执行文件，只产生 C++ 头文件。</description>
+  <description>自定义 msg/srv/action。这个包不产生任何可执行文件，只产生 C++ 头文件。</description>
   <!-- 记得改成你自己的名字和邮箱，colcon 会检查格式 -->
   <maintainer email="you@example.com">Your Name</maintainer>
   <license>Apache-2.0</license>
@@ -37,6 +37,37 @@
 
   <!-- std_msgs 编译期和运行期都要（因为 Target.msg 里嵌了 Header） -->
   <depend>std_msgs</depend>
+
+  <!--
+    ★ action_msgs：只在包里**有 .action 文件**时才需要这一行。
+
+    它和 CMakeLists.txt 里那句 find_package(action_msgs REQUIRED) 是一对，
+    对应 §3.5 讲过的"一个依赖要写两处"：
+
+        CMakeLists.txt 里的 find_package   给 CMake 用（生成时找类型定义）
+        package.xml 里的 <depend>          给 colcon/rosdep 用（排构建顺序、装依赖）
+
+    为什么 .action 会需要它：生成出来的类型里，"取消"复用的是
+    action_msgs/srv/CancelGoal 这个**通用**服务（不是每个 action 各生成一份），
+    另外生成的 FeedbackMessage 里嵌了 action_msgs/GoalInfo。
+    这可以在 install/demo_interfaces/include/.../calibrate__struct.hpp
+    里直接看到，见 README §2.5。
+
+    ★★ 但要知道：**这一行的"重要性"和别的 depend 不太一样。**
+      Humble 的 rosidl_generate_interfaces.cmake 第 140-156 行会自己
+      find_package(action_msgs) 并把它加进依赖和导出 —— 也就是说，
+      你**只**在 CMakeLists 里手写那行 find_package，本机也能编过。
+      这一行真正管的是**别人拿到这个包的时候**：
+      rosdep 要不要装它、干净环境里找不找得到它。
+      所以：不要因为"删了也能编"就把它删掉。判别方法不是看编译器，
+      而是 rosdep check（参数写法见 README §7.4）。
+
+    注意这里**不要**写 rclcpp_action：
+      那是写 action server/client 的 C++ 库，属于 demo_nodes 的依赖。
+      消息包只管生成数据结构，不管谁来用 —— 混淆这两者是 action
+      相关报错最常见的来源。
+  -->
+  <depend>action_msgs</depend>
 
   <!--
     ★ 这一行的作用被严重低估：它把本包登记进 rosidl_interface_packages 这个组。

@@ -3,7 +3,7 @@ build/
 install/
 log/
 
-# 本工程用 Docker 跑，不需要本地工具链的产物
+# Ubuntu 原生和 Docker 两种跑法都会产生的垃圾
 __pycache__/
 *.pyc
 .vscode/

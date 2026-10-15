@@ -10,10 +10,10 @@
 ## 0. 这个例子是什么
 
 一个 PID 闭环控制 demo。控制器的参数由另一个包里的库提供，
-消息类型由第三个包生成，还有一个纯命令行工具用来离线整定参数。
+接口类型由第三个包生成，还有一个纯命令行工具用来离线整定参数。
 
 ```
-                    demo_interfaces          自定义 msg / srv
+                    demo_interfaces          自定义 msg / srv / action
                     （代码生成）              ．不产生任何可执行文件
                           │                   ．只产生 C++ 头文件
                           │                   ．学: rosidl_generate_interfaces
@@ -28,24 +28,115 @@
                           │                      ．学: 纯标准 CMake 写法
                           │
                           ▼
-    demo_nodes ───────► 两个 ROS 节点            ．只产生可执行文件
-    （节点包）            controller + monitor    ．学: install 可执行文件与资源
+    demo_nodes ───────► 三个 ROS 节点            ．只产生可执行文件
+    （节点包）            controller             ．学: install 可执行文件与资源
+                          monitor
+                          tune_client
 ```
 
 四个包刚好覆盖四种典型情况：
 
 | 包 | 产出 | 学到的 CMake 机制 |
 |---|---|---|
-| `demo_interfaces` | 头文件（由 `.msg`/`.srv` 生成） | 代码生成如何挂到 CMake 上 |
+| `demo_interfaces` | 头文件（由 `.msg`/`.srv`/`.action` 生成） | 代码生成如何挂到 CMake 上 |
 | `demo_math` | 共享库 `libdemo_math.so` | 怎么把库**导出**给别人用 |
 | `demo_tools` | 共享库 + 可执行文件 | 怎么**消费**别人的库；PUBLIC/PRIVATE |
-| `demo_nodes` | 两个可执行文件 | install 规则、依赖传递的终点 |
+| `demo_nodes` | 三个可执行文件 | install 规则、依赖传递的终点 |
+
+**三种接口在一个节点里各有一个，正好可以横向对比：**
+
+| 接口 | 本工程里是哪个 | 一句话 |
+|---|---|---|
+| topic | `demo_interfaces/msg/Target` | 只管一直往外说，不关心谁在听 |
+| service | `demo_interfaces/srv/Reset` | 一问一答，立刻返回 |
+| **action** | `demo_interfaces/action/Calibrate` | **领一个长时间任务，中途汇报进度，还能被取消** |
+
+action 在构建系统里是最容易被人想复杂的一个。本书会把它讲到底：
+**它在网络上根本不存在** —— 一个 action = 3 个服务 + 2 个话题拼出来的约定。见 §2.5 和 §7。
 
 ---
 
 ## 1. 跑起来
 
-### 1.1 环境
+### 1.0 两条路，选一条
+
+本工程可以在两种环境下跑，**代码完全一样**，只是"怎么把 ROS2 备齐"不同：
+
+| | **Ubuntu 原生**（推荐） | Windows + Docker |
+|---|---|---|
+| 适合 | 手边就是 Ubuntu（22.04） | 只有 Windows |
+| 入口 | [ubuntu/build-and-run.sh](ubuntu/build-and-run.sh) | `docker/run.ps1` |
+| 要先装 | ROS2（一条命令，见 §1.1） | Docker Desktop |
+| 仓库在哪 | 你 clone 到的任意位置 | 固定挂载到容器里的 `/ws` |
+| 编译快慢 | 快（原生） | 慢一些（挂载卷 + 容器） |
+| 折腾程度 | 装 ROS2 那一下稍慢，之后都顺 | 拉镜像那一下可能卡（见 §1.3） |
+
+**Ubuntu 上两条命令就能跑完：**
+
+```bash
+bash ubuntu/setup-ros2.sh        # ① 检测 + 装齐依赖（幂等，可以反复跑）
+bash ubuntu/build-and-run.sh     # ② 编译 + 把五个能跑的东西全跑一遍
+```
+
+> `setup-ros2.sh` 不会盲目装东西 —— 它先检测，缺什么才装什么。
+> 想先看看自己缺不缺、又不想动系统，加 `--check-only`：
+>
+> ```bash
+> bash ubuntu/setup-ros2.sh --check-only
+> ```
+
+> ⚠️ **本书里的 `/ws/...` 路径都是 Docker 环境下的实测输出。**
+> 在 Ubuntu 原生模式下，把 `/ws` 换成你的仓库根目录即可
+> （本机是 `/home/byd/workspace/ros2-master`）。
+> 两种模式下的**目录结构完全一致**，所以其余部分照读不误。
+
+<details>
+<summary>为什么不干脆只留一条路？</summary>
+
+Docker 那条路本来是为了"Windows 上也能跑"。换成 Ubuntu 之后，
+容器那一层反而成了**多余的中间商**：ROS2 本来就装在系统里，
+再套一层容器只会让路径变长（`/ws`）、编译变慢、`ros2` 的发现机制偶尔抽风。
+
+但 Docker 那条路不该删 —— 它对"不想动系统环境"和"Windows 用户"仍然有用。
+所以两条都留着，各自独立，互不影响。
+</details>
+
+### 1.1 Ubuntu 原生路径：装 ROS2
+
+只有在**从没装过 ROS2** 的机器上才需要看这一节。装过的直接跳到 §1.4。
+
+```bash
+bash ubuntu/setup-ros2.sh
+```
+
+这个脚本做的事，按顺序是：
+
+1. 检查是不是 Ubuntu 22.04（jammy）—— Humble 只支持这个版本
+2. 检查 ROS2 的 apt 源和 GPG key，缺了就加（默认走中科大镜像）
+3. 逐项检查编译依赖，**缺什么装什么**
+4. 检查 `colcon`、`ros2` 的各个子命令能不能用
+5. （可选）提示你装 `rosdep`
+
+想换镜像源：
+
+```bash
+ROS_MIRROR=tuna bash ubuntu/setup-ros2.sh     # ustc（默认）/ tuna / official
+```
+
+> **脚本里的检测逻辑有两个刻意的设计，值得注意**（它本身就当教材写）：
+>
+> **① 判断"装没装"要问命令，不要问包管理器。**
+> `colcon` 就是个好例子：apt 装的话包名是 `python3-colcon-common-extensions`，
+> pip 装的话根本没有这个 dpkg 包。本机就是 pip 装的 ——
+> 只信 `dpkg -l` 的话，脚本会劝一个明明能用的机器再去装一遍。
+>
+> **② "缺依赖"分两种情形，装法不同。**
+> 机器上压根没有 ROS2 → 装 `ros-base` 一个大礼包；
+> 已经装过只是缺几个 → 只补缺的那几个。
+> 判断依据是 `/opt/ros/humble/setup.bash` 在不在，
+> 而不是数装了多少个包。
+
+### 1.2 Windows / Docker 路径：环境
 
 只需要 Docker。用官方的 ROS2 Humble 镜像：
 
@@ -69,7 +160,7 @@ docker pull docker.m.daocloud.io/ros:humble-ros-base
 >
 > 验证方法：`docker pull` 一个 alpine 试试。能过就是好了。
 
-### 1.2 进入容器
+### 1.3 进入容器（Windows）
 
 在仓库根目录：
 
@@ -79,7 +170,17 @@ powershell -ExecutionPolicy Bypass -File .\docker\run.ps1
 
 它会挂载当前目录到容器里的 `/ws`，source 好 ROS2 环境，然后给你一个 shell。
 
-### 1.3 编译
+### 1.4 编译
+
+**Ubuntu 原生**（仓库根目录，随便哪个位置都行）：
+
+```bash
+source /opt/ros/humble/setup.bash
+colcon build
+source install/setup.bash
+```
+
+**Docker 里**：
 
 ```bash
 cd /ws
@@ -87,9 +188,26 @@ colcon build
 source install/setup.bash
 ```
 
+两种模式除了 `cd` 到哪儿之外**完全一样**。
+
+> ★ 这里有两个 `source` 是**两件不同的事**，别当成一个：
+>
+> | 命令 | 让当前 shell 认识什么 |
+> |---|---|
+> | `source /opt/ros/humble/setup.bash` | ROS2 **本身**（`ros2`、`rclcpp`、`std_msgs`……） |
+> | `source install/setup.bash` | **你这个工作空间里**的包（`demo_nodes`、`demo_interfaces`……） |
+>
+> 顺序不能反 —— 后者要去扩展前者的环境。两个都漏了会分别报
+> `ros2: command not found` 和 `Package 'demo_nodes' not found`，
+> 报错长得完全不一样，但根因是同一类。
+>
+> Docker 模式之所以常常只看见第二个，是因为 `run.ps1` 进容器时
+> 已经替你把第一个 source 过了。**换到 Ubuntu 原生，这个"隐形的步骤"没有了**，
+> 每个新开的终端都得自己敲一遍。这是从 Docker 切到裸机最容易栽的跟头。
+
 > `source install/setup.bash` 这一步新手最容易漏。见 [3.3](#33-find_package-凭什么能找到你自己写的包)。
 
-### 1.4 三个能跑的东西
+### 1.5 五个能跑的东西
 
 ```bash
 # ① 离线整定工具 —— 不是 ROS 节点，不需要起 DDS，最快能看到结果
@@ -97,22 +215,60 @@ ros2 run demo_tools tune_cli
 #   也可以绕开 ros2 CLI 直接执行（它就是个普通可执行文件）：
 #   ./install/demo_tools/lib/demo_tools/tune_cli
 
-# ② 两个节点一起跑，看 PID 闭环跟踪
+# ② 两个常驻节点一起跑，看 PID 闭环跟踪
 ros2 launch demo_nodes demo.launch.py
 
-# ③ 运行时改设定值，观察控制器重新收敛
-ros2 service call /controller/reset demo_interfaces/srv/Reset "{new_setpoint: 2.0}"
+# ③ 运行时改设定值，观察控制器重新收敛（service）
+ros2 service call /reset demo_interfaces/srv/Reset "{new_setpoint: 2.0}"
+
+# ④ 发一个 action 目标，看进度反馈和最终结果
+#    另开一个终端，先按 ② 跑起 controller，然后：
+ros2 action send_goal /calibrate demo_interfaces/action/Calibrate \
+    "{target: 1.0, tolerance: 0.1, hold_s: 0.5, timeout_s: 25.0}" --feedback
+
+# ⑤ 完整的 action 客户端（比 ④ 多演示"取消"）
+ros2 run demo_nodes tune_client_node --ros-args -p target:=0.5 -p cancel_after_s:=2.0
 ```
+
+> ⚠️ **第 ③ 条是 `/reset`，不是 `/controller/reset`。** 很多人会写错，
+> 因为它看起来"应该"带节点名。实测：
+> `ros2 service call /controller/reset ...` 会一直卡在 `waiting for service to become available`。
+>
+> 原因：相对名是拼在**命名空间**后面的，不是拼在节点名后面。
+> 节点名是 `controller`，但命名空间是 `/`，所以 `"reset"` 展开就是 `/reset`。
+> 想要 `/controller/reset` 得把名字写成 `"~/reset"`（`~` = 节点私有命名空间）。
+> 详见 [controller_node.cpp](src/demo_nodes/src/controller_node.cpp) 里的注释。
 
 > 注意 `tune_cli` 属于 **demo_tools** 包，不是 demo_nodes。
 > `ros2 run <包名> <可执行名>` 的第一个参数是**包名**，它去 `lib/<包名>/` 下找可执行文件。
 > 包名写错会报 `No executable found`。
 
-也可以一条命令跑完全套检查：
+> `tune_client_node` 的**退出码是有含义的**，可以直接用在脚本里：
+> `0`=校准成功，`1`=目标被拒绝/连不上服务端，`2`=失败(超时)或被取消。
+
+> ⚠️ **④ 和 ⑤ 同一时间只能跑一个。** 本工程的 `handleGoal` 在
+> "已有任务在执行"时会拒绝新目标。所以如果你刚发完 ④ 又立刻发一次，
+> 命令行会打印 `Goal was rejected.` —— 这不是坏了，是设计如此（实测）。
+> 等上一条 `calibrate 成功/超时` 的日志出现再发下一条。
+
+> 顺带一提：④ 那种"发完就 `Ctrl-C`"的做法会让服务端继续把任务跑完
+> （客户端退出不等于任务取消）。想知道怎么叫停，看 ⑤ 的 `cancel_after_s`。
+
+也可以一条命令跑完全套检查 —— 上面这五条它全替你跑一遍：
 
 ```bash
+# Ubuntu 原生（脚本自己找仓库根目录，在哪儿调用都行）
+bash ubuntu/build-and-run.sh
+
+# Docker 里
 bash /ws/docker/build-and-run.sh
 ```
+
+> 两个脚本做的事**一模一样**，唯一的实质区别是 `ubuntu/` 那个
+> 不写死 `/ws`，而是用 `${BASH_SOURCE[0]}` 自己算出仓库在哪。
+> 容器里路径永远是 `/ws`，写死反而省事；裸机上仓库在哪取决于
+> clone 到哪儿了，所以必须算。这个差别本身值得看一眼，
+> 脚本第 20-40 行就是在讲这件事。
 
 ---
 
@@ -134,10 +290,15 @@ find /ws/build/demo_interfaces -name "*__struct.hpp"
 ```
 build/demo_interfaces/rosidl_generator_cpp/demo_interfaces/msg/detail/target__struct.hpp
 build/demo_interfaces/rosidl_generator_cpp/demo_interfaces/srv/detail/reset__struct.hpp
+build/demo_interfaces/rosidl_generator_cpp/demo_interfaces/action/detail/calibrate__struct.hpp
 ```
 
-**`.msg` 文件在这里被真正"翻译"成了 C++ 结构体。**
+**`.msg` / `.srv` / `.action` 文件在这里被真正"翻译"成了 C++ 结构体。**
 `rosidl_generate_interfaces()` 背后做的事，就是这一堆代码生成器 + 编译。
+
+> ★ 三种接口的文件名长得一模一样（`<名字>__struct.hpp`），
+> 只有中间那层目录不同（`msg/` `srv/` `action/`）。
+> 这不是巧合 —— 因为 action 生成出来的东西**本来就是消息和服务**（§2.5 会证明）。
 
 再看安装出去的部分（下游 `#include` 的实际来源）：
 
@@ -340,6 +501,190 @@ build/demo_nodes/     install/demo_nodes/
 
 **这是理解 ROS2 构建系统最重要的一条。** 官方术语叫 isolated install
 （隔离安装），`colcon build --merge-install` 可以改成合并安装，但默认是隔离的。
+
+### 2.5 一个 `.action` 到底生成了什么
+
+**这一节建议编译完立刻做一遍。** 它是本工程里最反直觉、也最"祛魅"的一条。
+
+先说结论，再一条条给你证据：
+
+> **ROS2 在通信层根本没有"action"这个原语，只有 topic 和 service。
+> 一个 action = 3 个服务 + 2 个话题。**
+
+听起来像暴论，但下面四条全是本工程实际编译 + 实际运行出来的结果。
+
+#### 证据 ① 一个 `.action` 生成了 7 个类型
+
+打开生成的 C++ 头文件，在 `demo_interfaces::action` 命名空间下能找到这些类型：
+
+```
+Calibrate_Goal              ← Goal 段，本质就是个普通消息
+Calibrate_Result            ← Result 段
+Calibrate_Feedback          ← Feedback 段
+Calibrate_SendGoal          ← 服务：客户端提交目标
+Calibrate_GetResult         ← 服务：客户端取回最终结果
+Calibrate_FeedbackMessage   ← 消息：反馈的**内部**载体
+Calibrate                   ← 门面：把上面这些串起来
+```
+
+`.action` 里只写了 3 段，怎么冒出 2 个服务和 1 个额外消息的？
+因为**发送目标、取回结果在协议上就是两次服务调用**。
+
+#### 证据 ② 生成的门面结构体，等于一份自白书
+
+[install/…/action/detail/calibrate__struct.hpp](src/demo_interfaces/action/Calibrate.action)
+的最后 30 行，长这样（**一字未改，来自实际产物**）：
+
+```cpp
+struct Calibrate
+{
+  using Goal     = demo_interfaces::action::Calibrate_Goal;
+  using Result   = demo_interfaces::action::Calibrate_Result;
+  using Feedback = demo_interfaces::action::Calibrate_Feedback;
+
+  struct Impl
+  {
+    using SendGoalService   = demo_interfaces::action::Calibrate_SendGoal;
+    using GetResultService  = demo_interfaces::action::Calibrate_GetResult;
+    using FeedbackMessage   = demo_interfaces::action::Calibrate_FeedbackMessage;
+
+    using CancelGoalService = action_msgs::srv::CancelGoal;          // ★ 借来的
+    using GoalStatusMessage = action_msgs::msg::GoalStatusArray;     // ★ 借来的
+  };
+};
+```
+
+看最后两行 —— 它们**不是** `Calibrate_*` 开头，而是 `action_msgs::*`。
+
+**"取消"和"状态"这两件事根本没有按 action 各生成一份，
+而是所有 action 共用 `action_msgs` 里同一套通用服务/话题。**
+
+这直接解释了 §3.5 里那条"依赖要写两处"，也解释了为什么
+`demo_interfaces` 会依赖 `action_msgs` 这个看起来跟本工程毫无关系的包。
+
+> ★ 一个诚实的补充：实测发现 `rosidl_generate_interfaces()` 会**自己**去
+> `find_package(action_msgs)` 并把它加进依赖（源码见 §7.4）——
+> 所以本工程里手写的那行 `find_package(action_msgs REQUIRED)`
+> 严格说是**冗余**的。但**它必须存在**这件事是真的：
+> 只是"由谁写"由宏代劳了而已。手写出来，依赖关系才是可见的。
+
+#### 证据 ③ 运行时看网络：3 个服务 + 2 个话题
+
+跑起 `controller_node`，然后把**隐藏名**也列出来：
+
+```bash
+ros2 service list --include-hidden-services | grep calibrate
+ros2 topic   list --include-hidden-topics   | grep calibrate
+```
+
+实测输出：
+
+```
+/calibrate/_action/cancel_goal      ← action_msgs/srv/CancelGoal   （通用，借来的）
+/calibrate/_action/get_result       ← Calibrate_GetResult          （生成的）
+/calibrate/_action/send_goal        ← Calibrate_SendGoal           （生成的）
+
+/calibrate/_action/feedback         ← Calibrate_FeedbackMessage    （生成的）
+/calibrate/_action/status           ← action_msgs/msg/GoalStatusArray（通用，借来的）
+```
+
+**网络上找不到任何"action"字样。** 五个实体，全是服务和话题。
+
+> 为什么默认看不见？因为它们挂在 `_action/` 这个"隐藏"命名空间下，
+> 得加 `--include-hidden-*`。这也是从没注意过这件事的人这么容易忽略它的原因。
+
+> ★ **"五个"这件事本身就是证据**：`rcl_action_server_init()` 一上来就把
+> 3 个服务和 2 个发布者全建好了 —— 不需要等第一个 goal 到来。
+> 实测（在全新的 `ROS_DOMAIN_ID` 上，从未发过任何 goal）：
+>
+> ```
+> $ ros2 service list --include-hidden-services | grep calibrate
+> /calibrate/_action/cancel_goal
+> /calibrate/_action/get_result
+> /calibrate/_action/send_goal
+> $ ros2 topic list --include-hidden-topics | grep calibrate
+> /calibrate/_action/feedback
+> /calibrate/_action/status
+> $ ros2 topic info /calibrate/_action/status
+> Publisher count: 1        ← 没人订阅，但发布者确实在
+> ```
+>
+> 也就是说 action 服务端**从启动那一刻起就在网络上占了这五个名字**，
+> 和有没有任务无关。这从侧面说明了"action 是一组通信实体的固定组合"，
+> 而不像 service 那样是"一个名字，用时才亮"。
+
+顺便对比一下 `ros2 action list` 和 `ros2 node info` 的"高层视角"：
+
+```
+$ ros2 action list -t
+/calibrate [demo_interfaces/action/Calibrate]
+
+$ ros2 node info /controller
+  Service Servers:
+    /reset: demo_interfaces/srv/Reset
+  Action Servers:
+    /calibrate: demo_interfaces/action/Calibrate
+```
+
+**同一件东西，两个视角。** 高层视角里它是"一个 action"；
+底层视角里它是"三个服务 + 两个话题"。两句话都对，只是抽象层次不同。
+
+#### 证据 ④ 文件数量：`.action` 和 `.msg` 完全一样
+
+这条最简单粗暴，也最有说服力。数一数每种接口生成的头文件个数：
+
+```bash
+for n in target reset calibrate; do
+  printf "%-10s %s\n" "$n" "$(find install/demo_interfaces/include -iname "${n}*" | wc -l)"
+done
+```
+
+实测输出：
+
+```
+target     16
+reset      16
+calibrate  16
+```
+
+**三个数字一模一样，都是 16。**
+
+明明 `.action` 里塞了三段（Goal + Result + Feedback），
+生成的文件个数却和一个 `.msg` 完全相同 —— 因为
+`rosidl_adapter` 把整个 `.action` 翻成**一个** IDL 文件：
+
+```bash
+cat build/demo_interfaces/rosidl_adapter/demo_interfaces/action/Calibrate.idl
+#   module demo_interfaces { module action {
+#     struct Calibrate_Goal     { ... };
+#     struct Calibrate_Result   { ... };
+#     struct Calibrate_Feedback { ... };
+#   } }
+```
+
+三个 struct 挤在同一个 IDL 里，之后**所有生成器（C / C++ / Python /
+各种 typesupport）都是同一套流程，和 msg 没有任何区别**。
+
+#### 这一节对 CMake 的三条实用推论
+
+| 现象 | 原因 |
+|---|---|
+| 为什么 action 不需要单独的生成宏？`rosidl_generate_interfaces` 里它和 `.msg` 平起平坐 | 它生成出来的本来就是消息和服务，走同一条代码路径 |
+| 为什么 `action_msgs` 会进依赖？ | 生成的 `SendGoal` / `GetResult` / `FeedbackMessage` 里嵌了 `action_msgs` 的类型 |
+| 为什么"定义 action"**不需要** `find_package(rclcpp_action)`？ | 这里只生成**数据结构**。`rclcpp_action` 是写 server/client 的库，属于 `demo_nodes` 的依赖 |
+
+**一句话记住：`action_msgs` 是"定义接口"的依赖，`rclcpp_action` 是"写节点"的依赖。**
+action 相关的 CMake 报错，十有八九是把这两个写错了地方（见 §8 报错对照表）。
+
+> ★ 但别把上面那张表**背成教条**。实测发现（详见 §7.4）：
+> `action_msgs` 那一行在 Humble 里是宏**自动**完成的 ——
+> 手动删掉 `find_package(action_msgs)` 和 `DEPENDENCIES` 里的它，
+> 编译照样过。真正会炸的是 `rclcpp_action` 那一行，以及
+> "`DEPENDENCIES` 里写了却没 `find_package`"这种**配套**问题。
+>
+> **结论是**：分清"哪个包属于哪一侧"依然是对的心智模型，
+> 但"漏了就会报错"这个推断，只有对**一部分**依赖成立。
+> 想知道自己有没有漏，答案不在编译器里，在 `rosdep check` 里。
 
 ---
 
@@ -1125,7 +1470,275 @@ CMake 在干什么 —— 出问题时无从下手。**先用显式写法把机�
 
 ---
 
-## 7. 报错对照表
+## 7. interface 三兄弟：msg / srv / action
+
+前面 §2.5 已经从**构建产物**的角度证明了 action 是拼出来的。
+这一章从**怎么选、怎么写、CMake 怎么配**的角度把三者对齐。
+
+### 7.1 三者的关系，一句话
+
+```
+                底层通信原语（只有这两种！）
+                ┌──────────┐   ┌───────────┐
+                │  topic   │   │  service  │
+                └────┬─────┘   └─────┬─────┘
+                     │               │
+      ┌──────────────┘               │
+      │                              │
+      ▼                              ▼
+   msg/Target                  srv/Reset
+   （1 个话题）                 （1 个服务）
+
+                     action/Calibrate
+              ┌──────────────────────────────┐
+              │ = 3 个 service + 2 个 topic   │
+              │   ├── send_goal   service     │
+              │   ├── get_result  service     │
+              │   ├── cancel_goal service ────┼──► 借用 action_msgs/CancelGoal
+              │   ├── feedback    topic       │
+              │   └── status      topic ──────┼──► 借用 action_msgs/GoalStatusArray
+              └──────────────────────────────┘
+```
+
+**msg 和 srv 是"一等公民"，action 是"用一等公民搭出来的复合结构"。**
+记住这张图，后面所有关于 action 的困惑都能自己推出来。
+
+### 7.2 什么时候用哪个
+
+| 问题 | topic | service | action |
+|---|---|---|---|
+| 谁 → 谁 | 1 对多 | 1 对 1 | 1 对 1（但可以多个 goal 并存） |
+| 要等结果吗 | 不等，发完就完 | **等**，拿到响应才返回 | 不等，回调驱动 |
+| 会跑很久吗 | —— | ✗ 必须立刻返回 | ✓ 天生为长任务设计 |
+| 中途能看进度吗 | 只能靠另一个 topic | ✗ | ✓ Feedback |
+| 中途能叫停吗 | —— | ✗ | ✓ Cancel |
+| 典型例子 | 传感器数据、状态广播 | 读/写一个参数、查一次状态 | 导航到某点、抓取、**校准** |
+
+判断链（三句话，都答"否"就选 service）：
+
+```
+这个东西会跑很久吗？      ── 是 ──┐
+中途想看到进度吗？        ── 是 ──┼──► action
+中途可能要取消吗？        ── 是 ──┘
+三个都否 ──► service
+不需要应答、只要持续广播 ──► topic
+```
+
+> ★ 一个高频误判：**"耗时长"不是 action 的充分条件，只是必要条件。**
+> 如果一次数据库查询要 3 秒，但你只需要那 3 秒后的一个结果，
+> 那还是 service —— 因为它不需要反馈、不需要取消。
+> 反过来说，一个只跑 1 秒的任务如果是"移动机械臂到某处"，
+> 那它就该是 action（因为中途可能出事儿要叫停）。
+
+### 7.3 三者在 CMake / package.xml 里的对照
+
+这是本章的**实用部分**。三种接口在构建系统里的写法，逐项对照：
+
+| 要做的事 | msg | srv | action |
+|---|---|---|---|
+| 源文件放哪 | `msg/X.msg` | `srv/Y.srv` | `action/Z.action` |
+| CMake 里怎么注册 | `rosidl_generate_interfaces(${PROJECT_NAME} "msg/X.msg" ...)` —— **三种写在一起，同一个宏** | | |
+| 需要哪个 find_package | `std_msgs`（若引用 Header） | 无额外 | `action_msgs` —— 写也行，**宏会自己补**（见 §7.4） |
+| package.xml 要不要额外依赖 | 看引用 | 看引用 | **要，`<depend>action_msgs</depend>`**（这条才是真必须的） |
+| 要不要 `rosidl_default_generators` | 要 | 要 | 要（同一条） |
+| 要不要 `member_of_group` | **要** | 要 | 要（同一条） |
+| 用它的节点要 find_package 什么 | `rclcpp` | `rclcpp` | **`rclcpp_action`**（额外） |
+| 用它的节点要 include 什么 | `demo_interfaces/msg/x.hpp` | `demo_interfaces/srv/y.hpp` | `demo_interfaces/action/z.hpp` + `rclcpp_action/rclcpp_action.hpp` |
+| CLI 看定义 | `ros2 interface show demo_interfaces/msg/X` | `.../srv/Y` | `.../action/Z` |
+| CLI 调用 | `ros2 topic echo/pub` | `ros2 service call` | `ros2 action send_goal ... --feedback` / `ros2 action list` |
+
+**只有两处是 action 独有的**，就是上面加粗的那两行 —— 而且它们都是"多一个依赖"，
+不是什么新机制。**其余每一行，三种接口走的是同一条路。**
+
+### 7.4 最容易搞混的一对：`action_msgs` vs `rclcpp_action`
+
+这一对是 action 相关 CMake 报错的头号来源，单独拎出来说：
+
+```
+                 定义接口的一侧                使用接口的一侧
+              （demo_interfaces 包）        （demo_nodes 包）
+
+  源文件        action/Calibrate.action       controller_node.cpp
+                                              tune_client_node.cpp
+  要 find 谁    action_msgs                   rclcpp_action
+  为什么        .action 展开出的服务/消息       create_server() / create_client()
+                里嵌了 action_msgs 的类型      这些函数在这个库里
+  写在哪        demo_interfaces/CMakeLists    demo_nodes/CMakeLists
+
+  ★ 记住这条分界线：**定义接口 vs 使用接口。**
+```
+
+对应到本工程，四个文件里各有一行：
+
+```cmake
+# src/demo_interfaces/CMakeLists.txt —— 定义侧
+find_package(action_msgs REQUIRED)
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/Target.msg" "srv/Reset.srv" "action/Calibrate.action"
+  DEPENDENCIES std_msgs action_msgs)      # ← 给代码生成器看
+
+# src/demo_nodes/CMakeLists.txt —— 使用侧
+find_package(rclcpp_action REQUIRED)       # ← 给写 server/client 用
+ament_target_dependencies(controller_node rclcpp demo_interfaces demo_tools rclcpp_action)
+```
+
+```xml
+<!-- src/demo_interfaces/package.xml -->
+<depend>action_msgs</depend>
+
+<!-- src/demo_nodes/package.xml -->
+<depend>rclcpp_action</depend>
+```
+
+**写错的症状 —— 注意这里有个实测出来的反直觉事实（见 §8）：**
+
+| 写错的地方 | 报错 |
+|---|---|
+| `demo_nodes` 漏了 `rclcpp_action` | 编译期：`rclcpp_action/rclcpp_action.hpp: No such file`（实测） |
+| `demo_interfaces` 漏了 `find_package(action_msgs)` | **什么都不发生** ← 见下面的实测 |
+| `demo_interfaces` 的 `DEPENDENCIES` 漏了 `action_msgs` | **什么都不发生**（同上） |
+| `demo_interfaces/package.xml` 漏了 `<depend>action_msgs</depend>` | 本机不报错，但 `rosdep` / 干净环境会出问题 |
+| 把 `rclcpp_action` 写进 `demo_interfaces` | 能编过，但**毫无意义** —— 消息包不写节点，用不上它 |
+
+#### 实测：`rosidl_generate_interfaces()` 会**自己**去拿 `action_msgs`
+
+把 `demo_interfaces/CMakeLists.txt` 里的 `find_package(action_msgs REQUIRED)`
+注释掉、`DEPENDENCIES` 里的 `action_msgs` 删掉，**两个一起删**，重新编译：
+
+```
+Finished <<< demo_interfaces [3.46s]
+Summary: 1 package finished
+```
+
+**照样过。** 因为 Humble 的
+`/opt/ros/humble/share/rosidl_cmake/cmake/rosidl_generate_interfaces.cmake`
+里有这么一段（第 140–156 行）：
+
+```cmake
+# to generate action interfaces, we need to depend on "action_msgs"
+foreach(_tuple ${_interface_tuples})
+  ...
+  if("${_parent_dir}" STREQUAL "action")          # ← 只要有一个文件在 action/ 目录下
+    find_package(action_msgs QUIET)                # ← 宏自己 find
+    if(NOT ${action_msgs_FOUND})
+      message(FATAL_ERROR
+        "Unable to generate action interface for '${_tuple_file}'. "
+        "In order to generate action interfaces you must add a depend tag "
+        "for 'action_msgs' in your package.xml.")   # ← 注意它让你改的是 package.xml
+    endif()
+    list_append_unique(_ARG_DEPENDENCIES "action_msgs")   # ← 宏自己加进 DEPENDENCIES
+    ament_export_dependencies(action_msgs)               # ← 宏自己导出
+    break()
+  endif()
+endforeach()
+```
+
+**能读出三件事**（前两条是实测，第三条是机制推理，我标明一下）：
+
+1. **实测**：`.action` 一出现，`action_msgs` 就被自动接上了 ——
+   `find_package`、`DEPENDENCIES`、`ament_export_dependencies` 三件事，宏全包了。
+   所以本工程里手写的那两行**是冗余的**（写出来只是为了让"依赖"这件事
+   在代码里看得见，教学上更清楚）。
+2. **实测**：`DEPENDENCIES` 里写了但没 `find_package` 的包会直接炸（见下面），
+   而 `action_msgs` 属于例外 —— **宏自己补的那一份，绕不过去，也不会漏**。
+3. **推论**（我在这台机器上没能验证，因为没装 `rosdep`）：
+   那个 `FATAL_ERROR` 什么时候才触发？只有当
+   `find_package(action_msgs QUIET)` **真的找不到**它的时候。
+   而 `package.xml` 决定 colcon 把哪些包放进构建环境 ——
+   在一个"只装了被依赖包"的干净环境里，"没声明 = 没装 = 找不到"。
+   本机 `/opt/ros/humble` 里恰好什么都有，所以把这一切掩盖了。
+
+> ★ **这一小节的通用教训**（比 action 本身更值得记）：
+> **"我这儿能编"永远不是"依赖写对了"的证据。**
+> 想知道自己有没有漏声明，要问的是**依赖检查工具**，不是编译器。
+> ROS2 的标准答案是 `rosdep`：
+>
+> ```bash
+> sudo apt install python3-rosdep          # 本机没有装
+> rosdep check --from-paths src --ignore-src
+> ```
+>
+> 它才是在模拟"别人拿到这个包"的场景。
+> （本工程这台机器上没装 `rosdep`，所以这条命令我**没有实测过** ——
+> 拿它当"该怎么做"的指引，别当"跑出来长这样"的证据。）
+
+**顺带一个真会炸的地方**（实测）：`DEPENDENCIES` 里写了但**没** `find_package` 的包，
+`rosidl_generate_interfaces()` 会在第 162 行直接 `FATAL_ERROR`：
+
+```
+CMake Error at .../rosidl_generate_interfaces.cmake:162 (message):
+  rosidl_generate_interfaces() the passed dependency 'std_msgs' has not been
+  found before using find_package()
+```
+
+`std_msgs` / `action_msgs` 之外，**你自己加的任何 `DEPENDENCIES` 都适用这条规则** ——
+这一条才是"生成阶段"最常见的报错。
+
+### 7.5 action 的"状态机"心智模型
+
+用 action 最别扭的地方，是从 service 的"函数调用"思维切不过来。
+
+```
+   service 的思维                       action 的思维
+   ──────────────                       ──────────────
+
+   resp = call(req)                     客户端                        服务端
+   └─ 一行代码，拿到结果                   │                             │
+                                         │  SendGoal 服务 ────────────►│
+                                         │◄──── 接受 / 拒绝 ───────────│  handleGoal()
+   中间发生什么？不知道。                    │                             │
+   有没有超时？自己想办法。                   │  ◄─── feedback 话题 ────────│  每拍发进度
+                                         │                             │
+                                         │  CancelGoal 服务 ──────────►│  handleCancel()
+                                         │◄──── 让不让取消 ────────────│
+                                         │                             │
+                                         │  GetResult 服务 ◄──────────►│  succeed()/abort()
+                                         │◄──── 最终结果 ──────────────│     /canceled()
+```
+
+**service 是"一次函数调用"，action 是"一个有生命周期的任务对象"。**
+这个差别落到代码上就是：
+
+| service 服务端 | action 服务端 |
+|---|---|
+| 一个回调函数，收请求、填响应、返回 | 三个回调（goal/cancel/accepted）**都只做决策**，真正的执行要挂在别的地方 |
+| 不用存状态 | **必须把任务存成状态**（本工程是 `goal_handle_` 那组成员） |
+| 天然不关心并发 | 要自己决定"允不允许同时跑两个目标" |
+
+本工程的 `controller_node` 就是照着这个写的：
+`handleGoal` / `handleCancel` / `handleAccepted` 三个回调全部立刻返回，
+真正的推进放在控制定时器里（`updateCalibration()`），
+**整个任务状态永远只有一个线程在改，不用加锁也不会打架。**
+
+```cpp
+// 三个回调都只做决策，不做收尾 —— 这是 action 服务端的标准写法
+rclcpp_action::GoalResponse   handleGoal(...);    // 接不接？
+rclcpp_action::CancelResponse handleCancel(...);  // 让不让取消？
+void                          handleAccepted(...); // 记下来，等下一拍推进
+
+// 唯一的"推进点"，和已存在的控制循环复用同一个线程
+void updateCalibration(...);  // 取消 / 成功 / 超时 / 发反馈，四个分支
+```
+
+> ★ 一个具体的坑：如果你的定时器周期是 20ms，而取消回调里直接调 `canceled()`，
+> 那就等于在回调线程里操作服务端内部状态。单线程 executor 下通常能跑，
+> 一旦换成多线程 executor 就会偶发死锁。
+> **把状态修改收敛到一个地方**，是这个坑唯一的通用解法。
+
+### 7.6 本工程里三种接口的"一次完整交互"
+
+把三个文件对照着扫一遍，比读十页文档快：
+
+| | topic | service | action |
+|---|---|---|---|
+| 定义 | [Target.msg](src/demo_interfaces/msg/Target.msg) | [Reset.srv](src/demo_interfaces/srv/Reset.srv) | [Calibrate.action](src/demo_interfaces/action/Calibrate.action) |
+| 服务端/发布端 | [controller_node.cpp](src/demo_nodes/src/controller_node.cpp) `onTimer()` | 同文件 `onReset()` | 同文件 `handleGoal/handleCancel/handleAccepted/updateCalibration` |
+| 客户端/订阅端 | [monitor_node.cpp](src/demo_nodes/src/monitor_node.cpp) | `ros2 service call` | [tune_client_node.cpp](src/demo_nodes/src/tune_client_node.cpp) |
+| 退出码/失败语义 | 无 | `success` 字段（自己定） | `ResultCode`：`SUCCEEDED`/`ABORTED`/`CANCELED` |
+
+---
+
+## 8. 报错对照表
 
 | 报错 | 根因 | 修法 |
 |---|---|---|
@@ -1140,6 +1753,32 @@ CMake 在干什么 —— 出问题时无从下手。**先用显式写法把机�
 | `message type not found` / 自定义消息编不过 | `package.xml` 少了 `<member_of_group>rosidl_interface_packages</member_of_group>` | 补上 |
 | 改了 launch / yaml 不生效 | 它们被 install 到 `share/` 下，源码目录的改动没同步 | 重新 `colcon build` |
 | 参数写了但节点用的是默认值 | `params.yaml` 顶层 key 和 launch 里的 `name=` 对不上 | 两边改成一致 |
+| `rosidl_generate_interfaces() the passed dependency 'std_msgs' has not been found before using find_package()` | `DEPENDENCIES` 里写了某个包，但上面没有 `find_package()` 它 | 补上 `find_package(std_msgs REQUIRED)`；两处必须配套（实测，见 §7.4） |
+| `Unable to generate action interface for '...'. ... you must add a depend tag for 'action_msgs' in your package.xml` | 有 `.action` 文件但**找不到** `action_msgs` 包 | 这个报错本身就告诉你了：在 `package.xml` 加 `<depend>action_msgs</depend>`（而在本机 `/opt/ros/humble` 里它总是找得到，所以通常看不到这条） |
+| 在 `demo_interfaces` 里删掉 `find_package(action_msgs)` 和 `DEPENDENCIES` 里的 `action_msgs`，**却什么都没发生** | 别以为漏写了 —— `rosidl_generate_interfaces()` 会自动替你 `find_package` + 加依赖 + 导出 | 不是 bug，见 §7.4 的宏源码；手写只是为了可读性 |
+| `fatal error: rclcpp_action/rclcpp_action.hpp: No such file` | `ament_target_dependencies` 里漏了 `rclcpp_action`（它的 include 目录是**按包**注册的，不会跟着 `rclcpp` 一起来） | 补上 `find_package(rclcpp_action REQUIRED)` 和 `ament_target_dependencies(... rclcpp_action)`（实测见练习 k） |
+| `undefined reference to rclcpp_action::create_server<...>` | 头文件可见但库没链接（比如手写 `target_include_directories` 却忘了 `target_link_libraries(... rclcpp_action::rclcpp_action)`） | 用 `ament_target_dependencies` 一把配齐，或手动把 target 链上 |
+| `package.xml` 里漏了 `<depend>rclcpp_action</depend>`，但本机照样编过 | **`package.xml` 不参与本机编译**，只在 `rosdep` / 构建顺序计算时起作用 | 别拿"我这儿能编"当依赖写对了的证据，见练习 k |
+| `rosidl_generate_interfaces() must be called before ...` / action 类型生成了但代码里找不到 | 文件放错目录，或者忘了在宏里列出 | `.action` 必须在 `action/` 目录下，且必须出现在 `rosidl_generate_interfaces()` 的参数里（见 §2.5） |
+| 客户端 `wait_for_action_server()` 超时 | 服务端没起 / 名字对不上 / 起来太慢 | 先起 `controller_node`；确认两边名字一致（`calibrate`）；超时给足（DDS 发现要几秒） |
+| 客户端发了 goal 但服务端毫无反应 | 服务端 `handleAccepted` 里存了 handle 却**忘了启动执行** | 本工程把执行放在已有定时器里，所以容易漏的是"没调 `updateCalibration()`" |
+| 服务端日志显示任务一直不结束 | `succeed()` / `abort()` 只在**某一拍**判断，条件永远不满足 | 检查退出条件（如 `tolerance` 比被控对象能到达的精度还小 —— 见 §1.4 的实测值） |
+| 取消请求发了，客户端却一直等不到结果 | `handleCancel` 里直接调了 `canceled()` 做收尾 | `handleCancel` 只**决定**让不让取消，收尾放在定时器里（本工程 `updateCalibration` 的 `is_canceling()` 分支） |
+| `ros2 action list` 看得到，`ros2 service list` 看不到 `_send_goal` | 隐藏实体默认不显示 | `ros2 service list --include-hidden-services`（见 §2.5） |
+| 以为自己写了 action 就是"引入了一种新通信方式" | 误解，见 §2.5 实测 | action = 3 服务 + 2 话题，底层没有新原语 |
+
+**从 Docker 换到 Ubuntu 原生，会新遇到的一批：**
+
+| 报错 | 根因 | 修法 |
+|---|---|---|
+| `error while loading shared libraries: libdemo_math.so` / `Package 'demo_nodes' not found` | **忘了 `source install/setup.bash`**。容器里 `run.ps1` 替你做过，裸机上没人替你做了 | 每个**新开的终端**都要 `source /opt/ros/humble/setup.bash && source install/setup.bash` |
+| `ros2: command not found` | 只 source 了 `install/setup.bash`，没 source `/opt/ros/humble/setup.bash` | 两个 source 是两件事，见 §1.4 的表；顺序也不能反 |
+| `/opt/ros/humble/setup.bash: line 8: AMENT_TRACE_SETUP_FILES: unbound variable` | 你的脚本开了 `set -u`，而 ROS2 的 `setup.bash` 靠"读一个可能没定义的变量"来判断状态 —— **两套约定打架** | source 前后临时 `set +u` / `set -u`（实测，见 [ubuntu/build-and-run.sh](ubuntu/build-and-run.sh) 里的 `source_ros()`） |
+| `E: 无法定位软件包 ros-humble-xxx` | Ubuntu 版本和 ROS2 发行版不匹配（Humble 只配 22.04/jammy） | 查 `/etc/os-release` 的 `VERSION_CODENAME`；24.04 要装的是 jazzy |
+| `fatal error: rclcpp_action/rclcpp_action.hpp: No such file`（全新机器上） | 压根没装这个包 —— 它**不在** `rclcpp` 里 | `sudo apt install ros-humble-rclcpp-action`，或跑 `bash ubuntu/setup-ros2.sh` |
+| 找不到 `rosidl_generate_interfaces` 这个宏 | 没装 `rosidl_default_generators`（生成 msg/srv/action 全靠它） | `sudo apt install ros-humble-rosidl-default-generators` |
+| 用 `dpkg -l` 查 colcon 查不到，但它明明能用 | colcon 可能是 **pip 装的**，那种装法没有对应的 dpkg 包 | 判断"有没有"要问 `command -v colcon`，不要问包管理器 |
+| 上次跑的节点还在后台发数据，控制台一团乱 | 容器用完就没了，**宿主机上的进程会一直活着** | `pkill -x controller_node`；`ubuntu/build-and-run.sh` 开头就替你做这件事 |
 
 ### 排查 `find_package` 的第一手段：让 CMake 自己招供
 
@@ -1200,7 +1839,7 @@ find_package considered the following locations for the Config module:
 
 ---
 
-## 8. 动手练习
+## 9. 动手练习
 
 按难度排序。**每个都建议真的做一遍。**
 
@@ -1296,6 +1935,221 @@ cmake --install /tmp/manual_build
 
 做完这个，colcon 在你眼里就彻底透明了。
 
+**h. 不用客户端节点，纯命令行跑一次 action** ——
+
+```bash
+ros2 run demo_nodes controller_node          # 终端 1
+ros2 action send_goal /calibrate demo_interfaces/action/Calibrate \
+  "{target: 1.0, tolerance: 0.1, hold_s: 0.5, timeout_s: 25.0}" --feedback
+```
+
+`--feedback` 开着，你能在终端里看到和 `tune_client_node` 一模一样的进度流。
+**这一步的意义**：证明 action 是**协议**，不是库。你的 C++ 客户端和
+命令行工具走的是同一条协议，所以可以互换。
+
+顺手再开一个终端 `ros2 action info /calibrate -t`，
+在任务运行中看一眼 goal 的当前状态 —— 这就是 `_status` 话题的内容。
+
+**i. 把"隐藏的 3 服务 2 话题"抓个现行** ——
+
+```bash
+ros2 run demo_nodes controller_node            # 终端 1
+# 终端 2，**不用发任何目标**：
+ros2 service list --include-hidden-services | grep calibrate
+ros2 topic   list --include-hidden-topics   | grep calibrate
+ros2 topic info /calibrate/_action/status
+```
+
+实测输出：
+
+```
+$ ros2 service list --include-hidden-services | grep calibrate
+/calibrate/_action/cancel_goal
+/calibrate/_action/get_result
+/calibrate/_action/send_goal
+$ ros2 topic list --include-hidden-topics | grep calibrate
+/calibrate/_action/feedback
+/calibrate/_action/status
+$ ros2 topic info /calibrate/_action/status
+Type: action_msgs/msg/GoalStatusArray
+Publisher count: 1
+Subscription count: 0
+```
+
+**★ 五个实体在节点启动那一刻就全在了**，哪怕一个 goal 都没发过、
+一个订阅者都没有（`Subscription count: 0`，但发布者确实是 1）。
+
+这件事值得停一下：**action 在网络上占的位置是固定的。**
+一个 action 服务端一启动，就实打实地占用了 5 个通信实体名；
+而没有客户端的时候，`_status` 那个发布者照样存在，只是在往外发空的东西。
+
+顺手把 `_status` 的内容也看一眼（**这个必须发个目标才有内容**）：
+
+```bash
+ros2 run demo_nodes tune_client_node &      # 或者 ros2 action send_goal --feedback
+sleep 2
+ros2 topic echo --once /calibrate/_action/status
+```
+
+实测字段（截取）：
+
+```yaml
+status_list:
+- goal_info:
+    goal_id:
+      uuid: [193, 251, 12, 187, ...]     # 16 字节，就是客户端生成的那个 goal_id
+    stamp:
+      sec: 1792052469
+    status: 2                             # ← 这个整数在变
+```
+
+对着字段念一遍：`goal_info` 里有 goal_id 和**时间戳**，
+`status` 是一个整数 —— 它的取值就是 `action_msgs/msg/GoalStatus`
+里那几个常量（`STATUS_EXECUTING` = 2、`STATUS_SUCCEEDED` = 4、……）。
+**你在 C++ 里调 `succeed()`，落到网络上就是这一个 `int8` 变了值。**
+
+**这题做完，§2.5 那张表就从"文档"变成"你亲手看过的东西"了。**
+
+**j. 让校准必失败** —— 把客户端的 `tolerance` 改成 `0.01`（物理上到不了）：
+
+```bash
+ros2 run demo_nodes tune_client_node --ros-args -p tolerance:=0.01 -p timeout_s:=10.0
+```
+
+观察三件事：
+
+1. 服务端日志里走的是 `abort()` 分支，不是 `succeed()`；
+2. 客户端打印的是"失败（服务端主动放弃）"（`ABORTED`）；
+3. **客户端仍然收到了完整的 `Result`** —— `success=false`、`final_error` 是那个到不了的值。
+
+> ★ 第 3 点是想让你记住：**"任务失败"和"通信失败"是两码事。**
+> `ABORTED` 是一次**成功的** action 交互 —— 协议层完好无损地跑完了，
+> 只是业务结论是"没做到"。action 的 `Result` 里那个 `message` 字段
+> 就是留给这种话的。
+
+**k. 破坏 action 的依赖，看它怎么炸** —— 这是本章最重要的练习。
+每次只改**一处**，重新 `colcon build`，把报错抄下来，再改回去：
+
+| 改哪 | 现象（全部实测） |
+|---|---|
+| `demo_interfaces/CMakeLists.txt` 去掉 `find_package(action_msgs)` | **什么都不发生** —— 宏自己补上了 |
+| `rosidl_generate_interfaces` 的 `DEPENDENCIES` 去掉 `action_msgs` | **什么都不发生** —— 同上 |
+| `demo_interfaces/CMakeLists.txt` 去掉 `find_package(std_msgs)`（但 `DEPENDENCIES` 里还留着它） | 配置阶段 `FATAL_ERROR`：`... the passed dependency 'std_msgs' has not been found before using find_package()` |
+| `demo_nodes/CMakeLists.txt` 的 `ament_target_dependencies` 去掉 `rclcpp_action` | 编译期 `fatal error: rclcpp_action/rclcpp_action.hpp: No such file or directory` |
+| `demo_nodes/package.xml` 去掉 `<depend>rclcpp_action</depend>` | **什么都不发生**，本机 `colcon build` 照样过 |
+
+实测输出（第三行 —— 真正会炸的那条）：
+
+```
+CMake Error at /opt/ros/humble/share/rosidl_cmake/cmake/rosidl_generate_interfaces.cmake:162 (message):
+rosidl_generate_interfaces() the passed dependency 'std_msgs' has not been
+found before using find_package()
+Failed   <<< demo_interfaces [0.83s, exited with code 2]
+```
+
+第四行的实测输出：
+
+```
+controller_node.cpp:36:10: fatal error: rclcpp_action/rclcpp_action.hpp:
+    No such file or directory
+Failed   <<< demo_nodes [1.47s, exited with code 2]
+```
+
+★ **前两行最值得琢磨。** 按直觉，"漏了个依赖"怎么也该报错吧？
+偏偏不报 —— 因为 `rosidl_generate_interfaces()` 自己在第 140–156 行
+补上了 `action_msgs`（源码见 §7.4）。
+**这份"体贴"正是很多人的认知盲区**：他以为依赖是自己在管，
+其实一部分是宏在管，于是下次换个不是 `action_msgs` 的依赖就翻车了。
+
+★ 而第四行（`rclcpp_action`）报的是**编译期**错，也值得停下来想：
+
+- 头文件装在 `/opt/ros/humble/include/rclcpp_action/`，
+  它**和 `rclcpp` 不是同一个 include 目录**。
+  `ament_target_dependencies` 是**按包**注册 include 目录的 ——
+  漏了 `rclcpp_action`，编译器就看不到那个目录，
+  于是报"头文件找不到"，而**不是**"链接不上"。
+- 想要链接期的 `undefined reference to rclcpp_action::...`，
+  得让头文件可见但库不可见。造法：把 `ament_target_dependencies`
+  换成手写 `find_package(rclcpp_action REQUIRED)` +
+  `target_include_directories(... ${rclcpp_action_INCLUDE_DIRS})`，
+  但**不**链接 `rclcpp_action::rclcpp_action`。
+
+★ 第五行才是真正的"教训行"：
+
+**`package.xml` 完全不影响你本机编译。** 它影响的是
+"别人 `rosdep install` 时能不能把依赖装上"、
+"`colcon build` 能不能算出正确的构建顺序"。
+所以**"我这儿能编"从来不是"依赖写对了"的证据** ——
+本机 `/opt/ros/humble` 里恰好什么都有，掩盖了一切漏声明。
+
+验证方法是问依赖检查工具，不是问编译器（这台机器上没装 `rosdep`，
+下面第一条**没实测过**，写出来是给你在自己机器上用的）：
+
+```bash
+sudo apt install python3-rosdep
+rosdep check --from-paths src --ignore-src     # 看它认不认得出依赖
+
+colcon build --packages-select demo_nodes --cmake-clean-cache   # 这条实测过，会强制重跑 CMake
+```
+
+**l.（进阶）让 action 支持多个并发 goal** ——
+
+现在的 `handleGoal` 在 `goal_handle_` 非空时直接拒绝。改成：
+
+- 用一个 `std::map<GoalUUID, GoalHandle::SharedPtr>` 存所有活动目标；
+- `updateCalibration` 遍历它们，每个各自判断成功/超时、各自发反馈；
+- 客户端那边同时发两个目标（一个 target=2.0，一个 target=-1.0）。
+
+你会**亲眼看到** PID 被两个目标来回撕扯，两个任务都很难收敛 ——
+然后你就理解了为什么真实机器人上几乎不用并发 goal，
+而是用"新目标顶掉旧目标"（`handleGoal` 里先 `cancel` 旧的再加新的）。
+
+> 这题的价值不在于写出能用的代码，而在于**把"允许并发"这个决定
+> 从"随手写的 if"变成"想过的设计选择"**。
+
+**m. 亲手制造那个 `unbound variable`** ——
+
+[ubuntu/build-and-run.sh](ubuntu/build-and-run.sh) 里有一段 `source_ros()`，
+专门在 `source` 前后开关 `set -u`。把那个函数改坏、直接 source，你会看到：
+
+```
+/opt/ros/humble/setup.bash: line 8: AMENT_TRACE_SETUP_FILES: unbound variable
+```
+
+然后**去读 `/opt/ros/humble/setup.bash` 的第 8 行附近**，
+看它到底在干什么。你会看到类似 `if [ -n "${AMENT_TRACE_SETUP_FILES:-}" ]`
+或者干脆就是裸读一个变量 —— 原来 ROS2 判断"有没有"的方式就是"读一下看看"。
+
+> 这题真正想让你记住的是：**`set -u` 和"靠读变量探测状态"这种写法是冲突的。**
+> 你会越来越多地在别人的脚本里见到这两种风格打架，
+> 认出它比背下解法更值钱。
+
+**n. 走一遍"从 Docker 换到裸机"的完整对照** ——
+
+如果你手上两台机器（或者同一台装过 Docker）都有，把这四条各跑一遍，
+对比输出：
+
+```bash
+# 容器里
+bash /ws/docker/build-and-run.sh
+# 宿主机
+bash ubuntu/build-and-run.sh
+```
+
+重点看**差异**，别看相同的地方：
+
+| | 容器 | 裸机 |
+|---|---|---|
+| 仓库路径 | 永远是 `/ws` | 取决于 clone 到哪儿 |
+| 要不要先 source ROS2 | 不用（`run.ps1` 做了） | **要** |
+| `chmod +x` 可执行文件 | 要（Windows 挂载会丢权限位） | 不用 |
+| 上次的节点会不会残留 | 不会（容器一关就没了） | **会**，得自己 `pkill` |
+| 编译速度 | 慢一些 | 快 |
+
+> **换个环境重新学一遍，比第一次学两遍收获更大。**
+> 因为这一次你知道了"哪些是 ROS2/CMake 本身的规则，
+> 哪些只是 Docker 那一层的习惯" —— 上面这张表就是在做这个切分。
+
 ---
 
 ## 附：文件清单
@@ -1308,7 +2162,8 @@ cmake --install /tmp/manual_build
 │   │   ├── CMakeLists.txt          ←   rosidl 代码生成 + ament_export_dependencies
 │   │   ├── package.xml             ←   build_depend / exec_depend 的分工
 │   │   ├── msg/Target.msg
-│   │   └── srv/Reset.srv
+│   │   ├── srv/Reset.srv
+│   │   └── action/Calibrate.action ←   三段式：Goal / Result / Feedback
 │   │
 │   ├── demo_math/                  ← ② 库包（用 ament 宏写）
 │   │   ├── CMakeLists.txt          ←   ★ 重点: ament_export_targets
@@ -1328,12 +2183,17 @@ cmake --install /tmp/manual_build
 │   │
 │   └── demo_nodes/                 ← ④ 节点包
 │       ├── CMakeLists.txt          ←   ★ 重点: 故意省略 find_package(demo_math)
+│       │                               + find_package(rclcpp_action)
 │       ├── package.xml             ←   ★ 重点: 有 demo_math，和上面形成对比
-│       ├── src/controller_node.cpp
+│       ├── src/controller_node.cpp ←   topic 发布 + service 服务端 + action 服务端
 │       ├── src/monitor_node.cpp
-│       ├── launch/demo.launch.py
+│       ├── src/tune_client_node.cpp ←  action 客户端（进度 / 取消 / 结果三回调）
+│       ├── launch/demo.launch.py   ←   with_client:=true 时连客户端一起起
 │       └── config/params.yaml
-└── docker/
-    ├── run.ps1                     ← 一键进容器
-    └── build-and-run.sh            ← 一键编译 + 全套验证
+├── ubuntu/                         ← Ubuntu 原生路线（§1.0 的两条路之一）
+│   ├── setup-ros2.sh               ←   检测 + 装齐 ROS2 依赖（幂等，支持 --check-only）
+│   └── build-and-run.sh            ←   一键编译 + 全套验证（不写死路径，自己算仓库根）
+└── docker/                         ← Windows / 容器路线（另一条）
+    ├── run.ps1                     ←   一键进容器
+    └── build-and-run.sh            ←   一键编译 + 全套验证（路径写死 /ws）
 ```

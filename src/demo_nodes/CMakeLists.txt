@@ -27,6 +27,32 @@ find_package(rclcpp REQUIRED)
 find_package(demo_interfaces REQUIRED)
 find_package(demo_tools REQUIRED)
 
+# -----------------------------------------------------------------------------
+#  ★ 写 action 节点要多 find 一个包：rclcpp_action
+#
+#  这里出现了一个很容易搞混的分工，值得单独说清楚：
+#
+#      demo_interfaces 里的 action_msgs   —— 生成"数据类型"用的
+#      demo_nodes      里的 rclcpp_action  —— 写"server / client"用的
+#
+#  两件事、两个包、两个位置。搞混的典型症状：
+#
+#    - 在消息包里写了 find_package(rclcpp_action)
+#      -> 编译能过，但毫无意义；真正缺的 action_msgs 一漏就报
+#         "action_msgs/msg/GoalInfo was not found"
+#
+#    - 在节点包里忘了 find_package(rclcpp_action)
+#      -> 报 "fatal error: rclcpp_action/rclcpp_action.hpp: No such file"
+#         或者链接期一大堆 undefined reference to rclcpp_action::...
+#
+#  ★ 顺带回答一个常见疑问：**能不能不用 rclcpp_action，自己拿 topic+service
+#    手搓一个 action？** 技术上完全可以 —— 因为 §2.5 已经证明了 action
+#    本来就是两个服务 + 两个话题。但别这么干：goal 的状态机有十来个状态和
+#    一堆边界情况（目标被拒、取消后又收到反馈、超时后又能取结果……），
+#    rclcpp_action 存在的全部价值就是帮你把这些状态管明白。
+# -----------------------------------------------------------------------------
+find_package(rclcpp_action REQUIRED)
+
 # =============================================================================
 #  ★★★ 注意这里没有 find_package(demo_math) ★★★
 #
@@ -72,19 +98,34 @@ find_package(demo_tools REQUIRED)
 # 一个可执行文件可以有任意多个源文件，也可以加子目录（见下面的"扩展练习"）。
 # -----------------------------------------------------------------------------
 add_executable(controller_node src/controller_node.cpp)
-# controller_node 用到了：rclcpp(节点框架)、demo_interfaces(自定义 msg/srv)、
+# controller_node 用到了：rclcpp(节点框架)、demo_interfaces(自定义 msg/srv/action)、
 #                         demo_tools(AutoTuner)、demo_math(通过 demo_tools 传递过来)
+#                         rclcpp_action(写 action 服务端)
 ament_target_dependencies(controller_node
   rclcpp
   demo_interfaces
   demo_tools
+  rclcpp_action
 )
 
 add_executable(monitor_node src/monitor_node.cpp)
 # monitor_node 只用 rclcpp + demo_interfaces
+# ★ 它不需要 rclcpp_action —— 因为它既不提供也不调用 action。
+#   "每个可执行文件只链接自己真正用到的东西"是现代 CMake 的基本原则：
+#   链接多了会让编译变慢、还会掩盖真实的依赖关系。
 ament_target_dependencies(monitor_node
   rclcpp
   demo_interfaces
+)
+
+# ★ 同一个 action 的客户端。它和 controller_node 是两个独立进程 ——
+#   action 的"客户端/服务端"是**跨进程**的概念，不是类之间的调用关系。
+#   想验证这一点，可以分别 ros2 run 它们，中间还能 `ros2 node list` 看两个节点。
+add_executable(tune_client_node src/tune_client_node.cpp)
+ament_target_dependencies(tune_client_node
+  rclcpp
+  demo_interfaces
+  rclcpp_action
 )
 
 # ★ 这里可以试试换成标准 CMake 写法，效果完全一样：
@@ -115,6 +156,7 @@ ament_target_dependencies(monitor_node
 install(TARGETS
   controller_node
   monitor_node
+  tune_client_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

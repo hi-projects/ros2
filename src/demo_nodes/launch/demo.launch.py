@@ -21,6 +21,9 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
@@ -48,4 +51,36 @@ def generate_launch_description():
         output='screen',
     )
 
-    return LaunchDescription([controller, monitor])
+    # ★ action 客户端默认**不**起。
+    #   原因是它和另外两个节点性质不同：
+    #     controller / monitor 是常驻服务，一启动就该在
+    #     tune_client 是"发一次任务就退出"的一次性工具
+    #   把它挂进默认 launch，每次 ros2 launch 都会自动跑一次校准 ——
+    #   想看闭环跟踪的人会莫名其妙地发现设定值被改了。
+    #
+    #   所以做成开关：
+    #       ros2 launch demo_nodes demo.launch.py                        # 只起两个常驻节点
+    #       ros2 launch demo_nodes demo.launch.py with_client:=true      # 顺带发一次校准任务
+    with_client = LaunchConfiguration('with_client')
+
+    tune_client = Node(
+        package='demo_nodes',
+        executable='tune_client_node',
+        name='tune_client',
+        parameters=[params_file],
+        output='screen',
+        # ★ 条件启动。注意 condition 是加在**动作**上的，不是加在流程上的 ——
+        #   launch 会照常构造这个 Node，只是不执行它。
+        condition=IfCondition(with_client),
+    )
+
+    return LaunchDescription([
+        DeclareLaunchArgument(
+            'with_client',
+            default_value='false',
+            description='是否同时启动 action 客户端，发一次校准任务',
+        ),
+        controller,
+        monitor,
+        tune_client,
+    ])

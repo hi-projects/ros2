@@ -40,7 +40,39 @@ controller:
     # 发布话题名。相对名会被解析成 <namespace>/target
     topic: target
 
+    # --- action: /calibrate 的进度汇报频率 ---
+    # 注意它和 period_ms 是**两个独立的节奏**：
+    #   period_ms            控制循环多久算一拍（50 Hz）
+    #   action_feedback_ms   多久往客户端汇报一次进度（10 Hz）
+    # 不分开的话，50Hz 的反馈会把 _feedback 话题压得比状态话题还重，
+    # 而客户端大多只是拿它画曲线 / 打日志，根本用不上那么密。
+    action_feedback_ms: 100
+
 monitor:
   ros__parameters:
     topic: target
     print_every: 25      # 每多少帧打印一行，50Hz 下 25 帧 = 0.5 秒
+
+# --- action 客户端（ros2 run demo_nodes tune_client_node 时读到的是这一段）---
+# 顶层 key 是节点名，所以节点必须叫 tune_client，见 launch 文件里的 name='tune_client'
+tune_client:
+  ros__parameters:
+    action: calibrate    # action 名。和 controller 里 create_server 的名字一致才会连上
+    target: 2.0          # 想让被控量稳定到哪
+
+    # ★ 这三个数必须一起定，而且要和被控对象的快慢匹配。
+    #   本工程这套 PID + 一阶惯性对象有一个约 6 秒的慢主导极点，
+    #   从误差 2.0 收敛到 0.1 要十几秒。所以：
+    #     tolerance 收到 0.01       -> 任务必然超时失败（物理上到不了，不是代码问题）
+    #     timeout_s 收到 5.0        -> 同上
+    #   想看"失败也是一种正常结局"，把 tolerance 改成 0.01 跑一次 ——
+    #   客户端会打印 ABORTED，和服务端主动放弃那条日志对得上。
+    tolerance: 0.1       # |error| 小于它就算到位
+    hold_s: 0.5          # 要在容差内连续保持多久才算成功
+    timeout_s: 30.0      # 最多允许跑多久
+
+    # ★ 演示"取消"用：设成 > 0 的值，客户端会在这么多秒后主动取消任务。
+    #   0 = 不取消，走完整流程。
+    #   试试 2.0：任务刚跑到一半就被叫停，最终结果里 success=false，
+    #   而 result code 是 CANCELED（和"超时失败"的 ABORTED 不是一回事）。
+    cancel_after_s: 0.0
